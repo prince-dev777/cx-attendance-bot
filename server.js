@@ -17,8 +17,8 @@ const USERS = {
     phone: '8538949912',
     chatId: '6333495869',
     username: 'saware01',
-    deviceSN: 'Biomax Device',
-    verifyType: 'ID Card'
+    deviceSN: 'Desktop QR Scanner',
+    verifyType: 'QR Scanner'
   },
   rahul: {
     staffId: '2',
@@ -26,8 +26,8 @@ const USERS = {
     phone: '9270875415',
     chatId: '679610147',
     username: 'rahulsir67',
-    deviceSN: 'Biomax Device',
-    verifyType: 'ID Card'
+    deviceSN: 'Desktop QR Scanner',
+    verifyType: 'QR Scanner'
   }
 };
 
@@ -46,15 +46,15 @@ const staffAttendanceSchema = new mongoose.Schema({
     type: { type: String, enum: ['IN', 'OUT'] },
     time: { type: String },
     timestamp: { type: Date, default: Date.now },
-    deviceSN: { type: String, default: 'Biomax Device' },
+    deviceSN: { type: String, default: 'Desktop QR Scanner' },
     round: { type: Number, default: 1 }
   }],
   status: { type: String, default: 'present' },
   durationMinutes: { type: Number, default: 0 },
   workHoursFormatted: { type: String, default: '0h 0m' },
-  deviceSN: { type: String, default: 'Biomax Device' },
+  deviceSN: { type: String, default: 'Desktop QR Scanner' },
   deviceIp: { type: String, default: '' },
-  verifyType: { type: String, default: 'ID Card' },
+  verifyType: { type: String, default: 'QR Scanner' },
   source: { type: String, default: 'BIOMETRIC_PUSH' },
   isDeleted: { type: Boolean, default: false }
 }, { timestamps: true });
@@ -224,8 +224,8 @@ async function handlePunch(profile, punchType, customTimeStr = null) {
     date: dateStr
   });
 
-  const chosenDeviceSN = profile.deviceSN || 'Biomax Device';
-  const chosenVerifyType = profile.verifyType || 'ID Card';
+  const chosenDeviceSN = profile.deviceSN || 'Desktop QR Scanner';
+  const chosenVerifyType = profile.verifyType || 'QR Scanner';
 
   if (!record) {
     record = new StaffAttendance({
