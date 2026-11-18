@@ -443,6 +443,38 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({ status: 'online', service: 'CX Attendance Bot', time: new Date().toISOString() }));
 });
 
+// --- 24/7 Keep-Alive Self-Ping (Prevents Cloud Free-Tier Spin Down) ---
+function setupKeepAlive() {
+  const targetUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+  if (!targetUrl) {
+    console.log('ℹ️ [Keep-Alive] No RENDER_EXTERNAL_URL or APP_URL configured in env. Self-ping skipped.');
+    return;
+  }
+
+  const PING_INTERVAL_MS = 9 * 60 * 1000; // 9 minutes (Prevents free tier inactivity shutdown)
+  console.log(`⏱️ [Keep-Alive] Initializing self-ping loop targeting ${targetUrl} (every 9m)`);
+
+  const ping = () => {
+    try {
+      const client = targetUrl.startsWith('https') ? https : http;
+      client.get(targetUrl, (res) => {
+        const istTime = new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+        console.log(`[Keep-Alive] 💓 Self-ping ${targetUrl} -> HTTP ${res.statusCode} at ${istTime} IST`);
+      }).on('error', (err) => {
+        console.warn(`[Keep-Alive] ⚠️ Ping warning: ${err.message}`);
+      });
+    } catch (e) {
+      console.warn(`[Keep-Alive] ⚠️ Ping error: ${e.message}`);
+    }
+  };
+
+  // Initial ping after 30 seconds to verify loop
+  setTimeout(ping, 30 * 1000);
+
+  // Periodic recurring ping
+  setInterval(ping, PING_INTERVAL_MS);
+}
+
 // --- Boot Application ---
 async function main() {
   if (!BOT_TOKEN) {
@@ -468,6 +500,7 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`🌐 Healthcheck HTTP Server listening on port ${PORT}`);
     startPolling();
+    setupKeepAlive();
   });
 }
 
