@@ -87,6 +87,17 @@ const StaffAttendance = mongoose.model('StaffAttendance', staffAttendanceSchema)
 const SMSLog = mongoose.model('SMSLog', smsLogSchema);
 const Staff = mongoose.model('Staff', staffSchema);
 
+// --- Distributed Atomic Deduplication Schema (Prevents Multi-Instance & Cloud Race Collisions) ---
+const processedUpdateSchema = new mongoose.Schema({
+  updateId: { type: Number, required: true, unique: true },
+  messageId: { type: Number },
+  chatId: { type: String },
+  command: { type: String },
+  createdAt: { type: Date, default: Date.now, expires: 600 } // Auto-deletes after 10m TTL
+});
+
+const ProcessedUpdate = mongoose.model('ProcessedUpdate', processedUpdateSchema);
+
 // --- Time Helper Functions (Strict IST Asia/Kolkata) ---
 function getNowIST() {
   const now = new Date();
@@ -196,8 +207,9 @@ function getProfileByChatId(chatId) {
   return null;
 }
 
-// --- In-Memory Anti-Bounce Cooldown Map (Prevents concurrent network/double-click race conditions) ---
+// --- In-Memory Anti-Bounce Cooldown Maps (Prevents rapid duplicate taps & race conditions) ---
 const punchCooldownMap = new Map(); // key: `${staffId}_${punchType}` -> timestamp ms
+const commandCooldownMap = new Map(); // key: `${chatId}_${commandText}` -> timestamp ms
 
 // --- Attendance Record Handler ---
 async function handlePunch(profile, punchType, customTimeStr = null) {
@@ -352,9 +364,38 @@ async function handlePunch(profile, punchType, customTimeStr = null) {
 async function handleUpdate(update) {
   try {
     if (!update.message || !update.message.text) return;
+    const updateId = update.update_id;
+    const messageId = update.message.message_id;
     const chatId = update.message.chat.id;
     const rawText = update.message.text.trim();
     const lowerText = rawText.toLowerCase();
+
+    // 🛡️ Layer 1: Distributed Cross-Server / Multi-Instance Deduplication via MongoDB Atomic Lock
+    if (updateId) {
+      try {
+        await ProcessedUpdate.create({
+          updateId,
+          messageId,
+          chatId: String(chatId),
+          command: rawText
+        });
+      } catch (dupErr) {
+        if (dupErr.code === 11000) {
+          console.log(`[Deduplication] ⚡ Blocked duplicate Telegram update #${updateId} from another instance/retry.`);
+          return; // STOP! Already processed by another instance or thread!
+        }
+      }
+    }
+
+    // 🛡️ Layer 2: Rapid Tap Cooldown (4s window for identical command per chat)
+    const commandKey = `${chatId}_${lowerText}`;
+    const now = Date.now();
+    const lastCmdTime = commandCooldownMap.get(commandKey) || 0;
+    if (now - lastCmdTime < 4000) {
+      console.log(`[Command Debounce] ⚡ Suppressed rapid duplicate '${rawText}' for chat ${chatId} (${Math.round((now - lastCmdTime) / 1000)}s ago).`);
+      return;
+    }
+    commandCooldownMap.set(commandKey, now);
 
     const profile = getProfileByChatId(chatId);
     if (!profile) {
