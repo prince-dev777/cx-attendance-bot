@@ -196,10 +196,24 @@ function getProfileByChatId(chatId) {
   return null;
 }
 
+// --- In-Memory Anti-Bounce Cooldown Map (Prevents concurrent network/double-click race conditions) ---
+const punchCooldownMap = new Map(); // key: `${staffId}_${punchType}` -> timestamp ms
+
 // --- Attendance Record Handler ---
 async function handlePunch(profile, punchType, customTimeStr = null) {
   const { timeStr, dateStr, formattedDate } = getNowIST();
   const effectiveTime = customTimeStr || timeStr;
+  const staffId = String(profile.staffId);
+  const cooldownKey = `${staffId}_${punchType}`;
+  const nowMs = Date.now();
+
+  // 🛡️ Step 0: In-Memory Anti-Bounce Protection (45s window against duplicate network requests)
+  const lastMemoryPunchMs = punchCooldownMap.get(cooldownKey) || 0;
+  if (nowMs - lastMemoryPunchMs < 45000) {
+    const elapsedSeconds = Math.max(1, Math.round((nowMs - lastMemoryPunchMs) / 1000));
+    console.log(`[Anti-Bounce] ⚡ Suppressed rapid in-memory duplicate ${punchType} for staff #${staffId} (${elapsedSeconds}s ago).`);
+    return { isDuplicate: true, elapsedSeconds, effectiveTime, dateStr, record: null };
+  }
 
   // 1. Fetch Staff Member from DB to get latest designation & instituteId
   const staffMember = await Staff.findOne({
@@ -253,6 +267,18 @@ async function handlePunch(profile, punchType, customTimeStr = null) {
       source: 'BIOMETRIC_PUSH'
     });
   } else {
+    // 🛡️ Step 0.5: Database-level Anti-Bounce (if last punch was of same type within 60s)
+    if (Array.isArray(record.punches) && record.punches.length > 0) {
+      const lastPunch = record.punches[record.punches.length - 1];
+      const lastPunchMs = lastPunch.timestamp ? new Date(lastPunch.timestamp).getTime() : 0;
+      const elapsedSeconds = Math.max(1, Math.round((nowMs - lastPunchMs) / 1000));
+      if (elapsedSeconds < 60 && lastPunch.type === punchType) {
+        console.log(`[Anti-Bounce DB] ⚡ Suppressed duplicate ${punchType} for ${staffName} (#${staffId}) - already recorded ${elapsedSeconds}s ago.`);
+        punchCooldownMap.set(cooldownKey, nowMs);
+        return { isDuplicate: true, elapsedSeconds, effectiveTime: lastPunch.time || effectiveTime, dateStr, record };
+      }
+    }
+
     // Determine Round
     const round = punchType === 'IN'
       ? record.punches.filter(p => p.type === 'IN').length + 1
@@ -286,6 +312,9 @@ async function handlePunch(profile, punchType, customTimeStr = null) {
 
   record.markModified('punches');
   await record.save();
+
+  // Commit cooldown timestamp now that punch is safely recorded
+  punchCooldownMap.set(cooldownKey, nowMs);
 
   // 3. Queue WhatsApp Alert in SMSLog (Master PC will automatically dispatch it)
   if (phone) {
@@ -362,13 +391,26 @@ async function handleUpdate(update) {
 
     // Check-In Command
     if (lowerText.startsWith('/in') || lowerText.includes('check-in') || lowerText.includes('punch-in')) {
-      const { record, effectiveTime, dateStr } = await handlePunch(profile, 'IN');
+      const punchRes = await handlePunch(profile, 'IN');
+      if (punchRes.isDuplicate) {
+        await sendTelegramMessage(chatId,
+          `⚠️ <b>Check-In Already Recorded!</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `👤 <b>Staff:</b> ${profile.name} (#${profile.staffId})\n` +
+          `🕒 <b>Time:</b> <code>${punchRes.effectiveTime}</code> (${punchRes.elapsedSeconds}s ago)\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `<i>Duplicate tap safely ignored to prevent duplicate alerts.</i>`,
+          getActionKeyboard()
+        );
+        return;
+      }
+
       await sendTelegramMessage(chatId,
         `🟢 <b>CHECK-IN RECORDED!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
         `👤 <b>Staff:</b> ${profile.name} (#${profile.staffId})\n` +
-        `📅 <b>Date:</b> ${dateStr}\n` +
-        `🕒 <b>Time:</b> <code>${effectiveTime}</code>\n` +
+        `📅 <b>Date:</b> ${punchRes.dateStr}\n` +
+        `🕒 <b>Time:</b> <code>${punchRes.effectiveTime}</code>\n` +
         `📱 <b>WhatsApp:</b> Triggered for <code>${profile.phone}</code>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
         `<i>Have a productive day at Career Xone!</i>`,
@@ -379,14 +421,27 @@ async function handleUpdate(update) {
 
     // Check-Out Command
     if (lowerText.startsWith('/out') || lowerText.includes('check-out') || lowerText.includes('punch-out')) {
-      const { record, effectiveTime, dateStr } = await handlePunch(profile, 'OUT');
-      const duration = record.workHoursFormatted || 'Recorded';
+      const punchRes = await handlePunch(profile, 'OUT');
+      if (punchRes.isDuplicate) {
+        await sendTelegramMessage(chatId,
+          `⚠️ <b>Check-Out Already Recorded!</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `👤 <b>Staff:</b> ${profile.name} (#${profile.staffId})\n` +
+          `🕒 <b>Time:</b> <code>${punchRes.effectiveTime}</code> (${punchRes.elapsedSeconds}s ago)\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `<i>Duplicate tap safely ignored to prevent duplicate alerts.</i>`,
+          getActionKeyboard()
+        );
+        return;
+      }
+
+      const duration = punchRes.record?.workHoursFormatted || 'Recorded';
       await sendTelegramMessage(chatId,
         `🔴 <b>CHECK-OUT RECORDED!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
         `👤 <b>Staff:</b> ${profile.name} (#${profile.staffId})\n` +
-        `📅 <b>Date:</b> ${dateStr}\n` +
-        `🕒 <b>Exit Time:</b> <code>${effectiveTime}</code>\n` +
+        `📅 <b>Date:</b> ${punchRes.dateStr}\n` +
+        `🕒 <b>Exit Time:</b> <code>${punchRes.effectiveTime}</code>\n` +
         `⏱️ <b>Total Duty:</b> <b>${duration}</b>\n` +
         `📱 <b>WhatsApp:</b> Triggered with Duration for <code>${profile.phone}</code>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
